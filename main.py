@@ -3,7 +3,7 @@ import logging
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, validator
@@ -110,6 +110,8 @@ class CollectionNotFoundError(HTTPException):
             detail=f"Collection '{collection_name}' not found"
         )
 
+
+
 # Global Exception Handler
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
@@ -135,7 +137,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("rag_quiz_api")
 
-
+UPLOAD_FOLDER = "uploads"
+# Create uploads folder if not exists
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -146,6 +151,44 @@ async def health_check():
         message="RAG Quiz System is running successfully",
         timestamp=datetime.now().isoformat()
     )
+
+@app.post("/upload-pdf")
+async def upload_pdf(file: UploadFile = File(...)):
+    """
+    Upload PDF to server and return the server path
+    to be used later in /process-book
+    """
+    logger.info(f"Uploading file: {file.filename}")
+
+    try:
+        # Allow only PDF
+        if not file.filename.lower().endswith(".pdf"):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "INVALID_FILE", "message": "Only PDF files are allowed"}
+            )
+
+        # Create full server path
+        save_path = os.path.join(UPLOAD_FOLDER, file.filename)
+
+        # Save file to server
+        with open(save_path, "wb") as buffer:
+            buffer.write(await file.read())
+
+        logger.info(f"PDF uploaded successfully: {save_path}")
+
+        return {
+            "status": "success",
+            "message": "PDF uploaded successfully",
+            "server_pdf_path": save_path
+        }
+
+    except Exception as e:
+        logger.error(f"Upload error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "UPLOAD_FAILED", "message": str(e)}
+        )
 
 @app.post("/process-book", response_model=ProcessBookResponse)
 async def process_book(request: ProcessBookRequest):
