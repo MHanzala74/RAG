@@ -1,5 +1,7 @@
 import os
 import logging
+import re
+
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
@@ -44,6 +46,10 @@ class StudentPerformance(BaseModel):
     correct_answers: int = Field(ge=0, description="Number of correct answers")
     total_questions: int = Field(gt=0, description="Total questions attempted")
     current_difficulty: str = Field(..., description="Current difficulty level")
+
+class EmailRequest(BaseModel):
+    email: str = Field(..., description="User email to convert into student_id")
+
 
 class GenerateQuizRequest(BaseModel):
     collection_name: str = Field(..., min_length=1, description="Collection name must not be empty")
@@ -151,6 +157,41 @@ async def health_check():
         message="RAG Quiz System is running successfully",
         timestamp=datetime.now().isoformat()
     )
+
+
+
+@app.post("/email-to-student-id")
+async def convert_email_to_student_id(request: EmailRequest):
+    """
+    Convert user email into a safe student_id
+    """
+    email = request.email.lower().strip()
+
+    # Validate simple email format
+    if "@" not in email:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "INVALID_EMAIL", "message": "Invalid email format"}
+        )
+    
+    # Extract part before '@'
+    username = email.split("@")[0]
+
+    # Replace invalid chars with underscore
+    cleaned = re.sub(r'[^a-zA-Z0-9_-]+', "_", username)
+
+    # Remove multiple underscores
+    cleaned = re.sub(r'_+', '_', cleaned)
+
+    # Final student_id
+    student_id = cleaned.strip("_")
+
+    return {
+        "email": email,
+        "student_id": student_id,
+        "status": "success"
+    }
+
 
 @app.post("/upload-pdf")
 async def upload_pdf(file: UploadFile = File(...)):
