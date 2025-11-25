@@ -50,13 +50,14 @@ class StudentPerformance(BaseModel):
 class EmailRequest(BaseModel):
     email: str = Field(..., description="User email to convert into student_id")
 
-
 class GenerateQuizRequest(BaseModel):
     collection_name: str = Field(..., min_length=1, description="Collection name must not be empty")
     topic: str = Field(..., min_length=2, max_length=100, description="Topic for quiz generation")
-    student_id: str = Field(..., pattern="^[a-zA-Z0-9_-]+$", description="Student identifier")  # Changed regex to pattern
+    # student_id: str = Field(..., pattern="^[a-zA-Z0-9_-]+$", description="Student identifier")  # Changed regex to pattern
+    student_id: Optional[str] = Field(default=None, description="Student identifier (optional)")
     num_questions: int = Field(default=10, gt=0, le=20, description="Number of questions between 1-20")
-    student_performance: Optional[Dict[str, Any]] = Field(default=None, description="Student performance data")
+    # student_performance: Optional[Dict[str, Any]] = Field(default=None, description="Student performance data")
+    student_performance: Optional[Dict[str, Any]] = None
     
     @validator('topic')
     def topic_must_be_valid(cls, v):
@@ -147,6 +148,7 @@ UPLOAD_FOLDER = "uploads"
 # Create uploads folder if not exists
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
+
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -263,59 +265,84 @@ async def process_book(request: ProcessBookRequest):
     except Exception as e:
         logger.error(f"Book processing error: {str(e)}")
         raise BookProcessingError(str(e))
-
+   
+    
 @app.post("/generate-quiz")
 async def generate_quiz(request: GenerateQuizRequest):
-    """Endpoint 3: Main endpoint - Generate adaptive quiz"""
-    logger.info(f"Generating quiz for student: {request.student_id}, topic: {request.topic}")
-    
+    logger.info(f"Generating quiz for topic: {request.topic}, student: {request.student_id}")
+
     try:
-        # Check if collection exists
+        # --- CHECK COLLECTION EXISTS ---
         collections = system.curriculum_agent.chroma_client.list_collections()
-        collection_names = [col.name for col in collections]
-        
+        collection_names = [c.name for c in collections]
+
         if request.collection_name not in collection_names:
             raise CollectionNotFoundError(request.collection_name)
-        
-        # Extract topic and generate quiz
-        topic_structure, quiz = system.extract_topic_and_generate_quiz(
-            collection_name=request.collection_name,
-            topic=request.topic,
-            student_id=request.student_id,
-            student_performance=request.student_performance,
-            num_questions=request.num_questions
-        )
-        
-        logger.info(f"Quiz generated successfully: {len(quiz)} questions")
-        
-        # Convert MCQ objects to dictionaries properly
-        quiz_dicts = []
-        for q in quiz:
-            if hasattr(q, '__dict__'):
-                quiz_dicts.append(q.__dict__)
-            else:
-                # Fallback for different object types
-                quiz_dicts.append({
-                    'question': getattr(q, 'question', ''),
-                    'options': getattr(q, 'options', []),
-                    'correct': getattr(q, 'correct', ''),
-                    'hint': getattr(q, 'hint', ''),
-                    'explanation': getattr(q, 'explanation', ''),
-                    'difficulty': getattr(q, 'difficulty', 'medium'),
-                    'concepts_covered': getattr(q, 'concepts_covered', []),
-                    'page_reference': getattr(q, 'page_reference', '')
-                })
-        
+
+        behavioral_agent = system.behavioral_agent
+        adjusted_difficulty = "medium"   # Default for first quiz
+
+        # =============================
+        # CASE 1: FIRST QUIZ (NO FEEDBACK)
+        # =============================
+        if request.student_id is None or request.student_performance is None:
+            logger.info("First quiz detected → No student performance provided")
+
+            topic_structure, quiz = system.extract_topic_and_generate_quiz(
+                collection_name=request.collection_name,
+                topic=request.topic,
+                student_id=request.student_id,
+                student_performance=None,
+                num_questions=request.num_questions,
+            )
+
+        else:
+            # =============================
+            # CASE 2: SECOND QUIZ (WITH FEEDBACK)
+            # =============================
+            logger.info(f"Second quiz detected → Running Behavioral Agent for student: {request.student_id}")
+
+            metrics = behavioral_agent.track_student_performance(
+                student_id=request.student_id,
+                time_per_question=request.student_performance.get("time_per_question", []),
+                hints_used=request.student_performance.get("hints_used", 0),
+                correct_answers=request.student_performance.get("correct_answers", 0),
+                total_questions=request.student_performance.get("total_questions", 1),
+                current_difficulty=request.student_performance.get("current_difficulty", "medium")
+            )
+
+            # Adjust difficulty based on past performance
+            adjusted_difficulty = behavioral_agent.adjust_difficulty(
+                student_metrics=metrics,
+                grade="9"
+            )
+
+            # Generate adaptive quiz
+            topic_structure, quiz = system.extract_topic_and_generate_quiz(
+                collection_name=request.collection_name,
+                topic=request.topic,
+                student_id=request.student_id,
+                student_performance=request.student_performance,
+                num_questions=request.num_questions,
+                # difficulty=adjusted_difficulty
+            )
+
+        # Convert quiz objects
+        quiz_dicts = [q.__dict__ if hasattr(q, '__dict__') else q for q in quiz]
+
         return {
-            "topic_structure": topic_structure.__dict__ if hasattr(topic_structure, '__dict__') else topic_structure,
+            "topic_structure": topic_structure.__dict__,
             "quiz": quiz_dicts,
             "total_questions": len(quiz),
-            "difficulty_adjusted": getattr(quiz[0], 'difficulty', 'medium') if quiz else 'medium'
+            "difficulty_adjusted": adjusted_difficulty
         }
-        
+
     except Exception as e:
         logger.error(f"Quiz generation error: {str(e)}")
         raise QuizGenerationError(str(e))
+
+
+
 
 @app.get("/get-student-metrics/{student_id}")
 async def get_student_metrics(student_id: str):
@@ -363,8 +390,6 @@ async def list_collections():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "COLLECTION_LIST_ERROR", "message": "Failed to list collections"}
         )
-
-
 
 if __name__ == "__main__":
     import uvicorn
